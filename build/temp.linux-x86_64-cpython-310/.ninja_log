@@ -1,0 +1,6 @@
+# ninja log v5
+1	44672	1760470203755800855	/home/tnguyen10/Desktop/deep_learning_research/test_cuda_lib/build/temp.linux-x86_64-cpython-310/dot_ext.o	549efb8ac2b53594
+1	45217	1760470934216880959	/home/tnguyen10/Desktop/deep_learning_research/test_cuda_lib/build/temp.linux-x86_64-cpython-310/torch_extension.o	db2c0ed7ba2b22ca
+1919	48696	1760471786884989682	/home/tnguyen10/Desktop/deep_learning_research/test_cuda_lib/build/temp.linux-x86_64-cpython-310/torch_extension.o	db2c0ed7ba2b22ca
+613	50315	1760474380844501195	/home/tnguyen10/Desktop/deep_learning_research/test_cuda_lib/build/temp.linux-x86_64-cpython-310/torch_extension.o	6919e4af5415691f
+2190	52609	1760474643431157533	/home/tnguyen10/Desktop/deep_learning_research/test_cuda_lib/build/temp.linux-x86_64-cpython-310/torch_extension.o	6919e4af5415691f
