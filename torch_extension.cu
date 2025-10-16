@@ -9,7 +9,7 @@
 #include "cutlass/gemm/device/gemm.h"
 #include "cutlass/layout/matrix.h"
 
-#include "cutlass/gemm/device/gemm_batched.h" 
+#include "cutlass/gemm/device/gemm_batched.h"
 
 #include <cutlass/cutlass.h>
 #include <cutlass/layout/matrix.h>
@@ -19,14 +19,12 @@
 
 #include <cutlass/arch/mma.h>
 
-
 #if __has_include(<cutlass/layout/matrix.h>)
-  #include <cutlass/layout/matrix.h>
+#include <cutlass/layout/matrix.h>
 #else
-  #include <cutlass/layout/row_major.h>
-  #include <cutlass/layout/column_major.h>
+#include <cutlass/layout/row_major.h>
+#include <cutlass/layout/column_major.h>
 #endif
-
 
 // -------------------------
 // 1) DOT PRODUCT
@@ -280,40 +278,6 @@ torch::Tensor matmul_int8_cutlass_forward(torch::Tensor A, torch::Tensor B)
 	return C;
 }
 
-
-
-
-// ---- CUTLASS types (SIMT/DP4A, row-major everywhere) ----
-using ElementA   = int8_t;
-using ElementB   = int8_t;
-using ElementAcc = int32_t;              // s8*s8 -> s32
-using ElementOut = cutlass::half_t;      // store FP16
-using ComputeEpi = float;                // alpha in float
-using LayoutABCD = cutlass::layout::RowMajor;
-
-// safest (no alignment assumptions)
-static int const kElementsPerAccess = 1;
-
-using EpilogueOp = cutlass::epilogue::thread::LinearCombination<
-    ElementOut,            // D (and C) element type
-    kElementsPerAccess,    // vector width (1 = scalar)
-    ElementAcc,            // accumulator
-    ComputeEpi             // alpha,beta compute type
->;
-
-// Pure SIMT (DP4A) kernel; adjust arch if needed (e.g., Sm75/Sm86/Sm90)
-using GemmSIMT = cutlass::gemm::device::Gemm<
-    ElementA, LayoutABCD,   // A
-    ElementB, LayoutABCD,   // B
-    ElementOut, LayoutABCD, // D (and C)
-    ElementAcc,             // accumulator
-    cutlass::arch::OpClassSimt,
-    cutlass::arch::Sm80,                    // target arch
-    cutlass::gemm::GemmShape<128,128,32>,   // threadblock
-    cutlass::gemm::GemmShape<64,64,32>,     // warp
-    cutlass::gemm::GemmShape<1,1,4>,        // instruction (DP4A)
-    EpilogueOp>;
-
 // -----------------------------------------------------------
 // PyTorch-facing function:
 //   D_fp16 = alpha_scale * (A_int8 @ B_int8)
@@ -321,79 +285,80 @@ using GemmSIMT = cutlass::gemm::device::Gemm<
 //   Returns D: [M,N] float16
 // -----------------------------------------------------------
 torch::Tensor matmul_int8_to_fp16_scaled_forward_noc(
-    const torch::Tensor& A,
-    const torch::Tensor& B,
-    double alpha_scale // scalar
-) {
-  TORCH_CHECK(A.is_cuda() && B.is_cuda(), "A and B must be CUDA tensors");
-  TORCH_CHECK(A.scalar_type() == at::kChar && B.scalar_type() == at::kChar, "A,B must be int8");
-  TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "A:[M,K], B:[K,N]");
-  TORCH_CHECK(A.is_contiguous() && B.is_contiguous(), "A,B must be contiguous");
+	const torch::Tensor &A,
+	const torch::Tensor &B,
+	double alpha_scale // scalar
+)
+{
+	TORCH_CHECK(A.is_cuda() && B.is_cuda(), "A and B must be CUDA tensors");
+	TORCH_CHECK(A.scalar_type() == at::kChar && B.scalar_type() == at::kChar, "A,B must be int8");
+	TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "A:[M,K], B:[K,N]");
+	TORCH_CHECK(A.is_contiguous() && B.is_contiguous(), "A,B must be contiguous");
 
-  int64_t M = A.size(0), K = A.size(1), N = B.size(1);
-  TORCH_CHECK(B.size(0) == K, "Inner dimension mismatch: A(M,K) x B(K,N)");
+	int64_t M = A.size(0), K = A.size(1), N = B.size(1);
+	TORCH_CHECK(B.size(0) == K, "Inner dimension mismatch: A(M,K) x B(K,N)");
 
-  // Output D is FP16 (row-major)
-  auto D = torch::empty({M, N}, A.options().dtype(torch::kFloat16));
+	// Output D is FP16 (row-major)
+	auto D = torch::empty({M, N}, A.options().dtype(torch::kFloat16));
 
-  // ---- CUTLASS types (same as before) ----
-  using ElementA   = int8_t;
-  using ElementB   = int8_t;
-  using ElementAcc = int32_t;
-  using ElementOut = cutlass::half_t;
-  using ComputeEpi = float;
-  using LayoutRM   = cutlass::layout::RowMajor;
+	// ---- CUTLASS types  ----
+	using ElementA = int8_t;
+	using ElementB = int8_t;
+	using ElementAcc = int32_t;
+	using ElementOut = cutlass::half_t;
+	using ComputeEpi = float;
+	using LayoutRM = cutlass::layout::RowMajor;
 
-  static int const kElementsPerAccess = 1;
-  using EpilogueOp = cutlass::epilogue::thread::LinearCombination<
-      ElementOut, kElementsPerAccess, ElementAcc, ComputeEpi>;
+	static int const kElementsPerAccess = 1;
+	using EpilogueOp = cutlass::epilogue::thread::LinearCombination<
+		ElementOut, kElementsPerAccess, ElementAcc, ComputeEpi>;
 
-  using GemmSIMT = cutlass::gemm::device::Gemm<
-      ElementA, LayoutRM,
-      ElementB, LayoutRM,
-      ElementOut, LayoutRM,
-      ElementAcc,
-      cutlass::arch::OpClassSimt,
-      cutlass::arch::Sm80,                   // adjust arch if needed
-      cutlass::gemm::GemmShape<128,128,32>,
-      cutlass::gemm::GemmShape<64,64,32>,
-      cutlass::gemm::GemmShape<1,1,4>,
-      EpilogueOp>;
+	using GemmSIMT = cutlass::gemm::device::Gemm<
+		ElementA, LayoutRM,
+		ElementB, LayoutRM,
+		ElementOut, LayoutRM,
+		ElementAcc,
+		cutlass::arch::OpClassSimt,
+		cutlass::arch::Sm80, // adjust arch if needed
+		cutlass::gemm::GemmShape<128, 128, 32>,
+		cutlass::gemm::GemmShape<64, 64, 32>,
+		cutlass::gemm::GemmShape<1, 1, 4>,
+		EpilogueOp>;
 
-  // *** FIX 1: brace-init to avoid most vexing parse ***
-  cutlass::gemm::GemmCoord problem_size{int(M), int(N), int(K)};
+	cutlass::gemm::GemmCoord problem_size{int(M), int(N), int(K)};
 
-  int lda = int(K), ldb = int(N), ldc = int(N), ldd = int(N);
+	int lda = int(K), ldb = int(N), ldc = int(N), ldd = int(N);
 
-  // No C/beta: pass D as C (valid pointer; beta=0 so it's not read)
-  const ElementOut* c_ptr =
-      reinterpret_cast<const ElementOut*>(D.data_ptr<at::Half>());
+	// No C/beta: pass D as C (valid pointer; beta=0 so it's not read)
+	const ElementOut *c_ptr =
+		reinterpret_cast<const ElementOut *>(D.data_ptr<at::Half>());
 
-  typename GemmSIMT::Arguments args(
-      problem_size,
-      {A.data_ptr<ElementA>(), lda},
-      {B.data_ptr<ElementB>(), ldb},
-      {c_ptr, ldc},
-      {reinterpret_cast<ElementOut*>(D.data_ptr<at::Half>()), ldd},
-      {static_cast<float>(alpha_scale), 0.0f}
-  );
+	typename GemmSIMT::Arguments args(
+		problem_size,
+		{A.data_ptr<ElementA>(), lda},
+		{B.data_ptr<ElementB>(), ldb},
+		{c_ptr, ldc},
+		{reinterpret_cast<ElementOut *>(D.data_ptr<at::Half>()), ldd},
+		{static_cast<float>(alpha_scale), 0.0f});
 
-  GemmSIMT op;
-  auto stream = at::cuda::getCurrentCUDAStream();
+	GemmSIMT op;
+	auto stream = at::cuda::getCurrentCUDAStream();
 
-  // *** FIX 2: use cudaMalloc/free for workspace (no device_memory::allocation) ***
-  size_t ws_bytes = GemmSIMT::get_workspace_size(args);
-  void* workspace = nullptr;
-  if (ws_bytes) {
-    TORCH_CHECK(cudaMalloc(&workspace, ws_bytes) == cudaSuccess, "workspace cudaMalloc failed");
-  }
+	// *** FIX 2: use cudaMalloc/free for workspace (no device_memory::allocation) ***
+	size_t ws_bytes = GemmSIMT::get_workspace_size(args);
+	void *workspace = nullptr;
+	if (ws_bytes)
+	{
+		TORCH_CHECK(cudaMalloc(&workspace, ws_bytes) == cudaSuccess, "workspace cudaMalloc failed");
+	}
 
-  cutlass::Status status = op(args, workspace, stream);
+	cutlass::Status status = op(args, workspace, stream);
 
-  if (workspace) cudaFree(workspace);
-  TORCH_CHECK(status == cutlass::Status::kSuccess, "CUTLASS fused int8->fp16 (SIMT) failed");
+	if (workspace)
+		cudaFree(workspace);
+	TORCH_CHECK(status == cutlass::Status::kSuccess, "CUTLASS fused int8->fp16 (SIMT) failed");
 
-  return D;
+	return D;
 }
 
 // ==================================
@@ -468,7 +433,7 @@ torch::Tensor bmatmul_int8_forward(torch::Tensor A, torch::Tensor B)
 	dim3 grid((N + TILE - 1) / TILE, (M + TILE - 1) / TILE, Bsz);
 
 	auto stream = at::cuda::getCurrentCUDAStream();
-	
+
 	bmatmul_int8_kernel<<<grid, block, 0, stream.stream()>>>(
 		reinterpret_cast<const int8_t *>(A.data_ptr<signed char>()),
 		reinterpret_cast<const int8_t *>(B.data_ptr<signed char>()),
@@ -478,102 +443,105 @@ torch::Tensor bmatmul_int8_forward(torch::Tensor A, torch::Tensor B)
 	return C;
 }
 
-
 // =================
 
 torch::Tensor matmul_int8_cutlass_forward_on_stream(torch::Tensor A, torch::Tensor B, cudaStream_t stream)
 {
-  TORCH_CHECK(A.is_cuda() && B.is_cuda(), "CUDA tensors required");
-  TORCH_CHECK(A.scalar_type() == at::kChar && B.scalar_type() == at::kChar, "int8 only");
-  TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "A:(M,K), B:(K,N)");
-  TORCH_CHECK(A.is_contiguous() && B.is_contiguous(), "contiguous required");
+	TORCH_CHECK(A.is_cuda() && B.is_cuda(), "CUDA tensors required");
+	TORCH_CHECK(A.scalar_type() == at::kChar && B.scalar_type() == at::kChar, "int8 only");
+	TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "A:(M,K), B:(K,N)");
+	TORCH_CHECK(A.is_contiguous() && B.is_contiguous(), "contiguous required");
 
-  int64_t M = A.size(0), K = A.size(1), N = B.size(1);
-  TORCH_CHECK(B.size(0) == K, "A(M,K) x B(K,N) inner dim mismatch");
+	int64_t M = A.size(0), K = A.size(1), N = B.size(1);
+	TORCH_CHECK(B.size(0) == K, "A(M,K) x B(K,N) inner dim mismatch");
 
-  auto C = torch::empty({M, N}, A.options().dtype(torch::kInt));
+	auto C = torch::empty({M, N}, A.options().dtype(torch::kInt));
 
-  using RowMajor = cutlass::layout::RowMajor;
-  using GemmInt8 = cutlass::gemm::device::Gemm<
-      int8_t,  RowMajor,
-      int8_t,  RowMajor,
-      int32_t, RowMajor,
-      int32_t
-  >;
+	using RowMajor = cutlass::layout::RowMajor;
+	using GemmInt8 = cutlass::gemm::device::Gemm<
+		int8_t, RowMajor,
+		int8_t, RowMajor,
+		int32_t, RowMajor,
+		int32_t>;
 
-  GemmInt8 gemm_op;
-  GemmInt8::Arguments args(
-      {int(M), int(N), int(K)},
-      {A.data_ptr<int8_t>(),  int(K)},   // lda
-      {B.data_ptr<int8_t>(),  int(N)},   // ldb
-      {C.data_ptr<int32_t>(), int(N)},   // ldc
-      {C.data_ptr<int32_t>(), int(N)},
-      {1, 0}                             // alpha, beta (int)
-  );
+	GemmInt8 gemm_op;
+	GemmInt8::Arguments args(
+		{int(M), int(N), int(K)},
+		{A.data_ptr<int8_t>(), int(K)},	 // lda
+		{B.data_ptr<int8_t>(), int(N)},	 // ldb
+		{C.data_ptr<int32_t>(), int(N)}, // ldc
+		{C.data_ptr<int32_t>(), int(N)},
+		{1, 0} // alpha, beta (int)
+	);
 
-  auto status = gemm_op(args, stream);   // <<< use the stream passed in
-  TORCH_CHECK(status == cutlass::Status::kSuccess, "CUTLASS int8 GEMM (stream) failed");
-  return C;
+	auto status = gemm_op(args, stream); // <<< use the stream passed in
+	TORCH_CHECK(status == cutlass::Status::kSuccess, "CUTLASS int8 GEMM (stream) failed");
+	return C;
 }
 
 // ========== 3) Batched wrapper: call the stream version in parallel ==========
 torch::Tensor bmm_int8_cutlass_forward_streams(torch::Tensor A, torch::Tensor B)
 {
-  TORCH_CHECK(A.is_cuda() && B.is_cuda(), "CUDA tensors required");
-  TORCH_CHECK(A.scalar_type() == at::kChar && B.scalar_type() == at::kChar, "int8 only");
-  TORCH_CHECK(A.is_contiguous() && B.is_contiguous(), "contiguous required");
-  TORCH_CHECK(A.dim() == 3, "A must be [B, M, K]");
+	TORCH_CHECK(A.is_cuda() && B.is_cuda(), "CUDA tensors required");
+	TORCH_CHECK(A.scalar_type() == at::kChar && B.scalar_type() == at::kChar, "int8 only");
+	TORCH_CHECK(A.is_contiguous() && B.is_contiguous(), "contiguous required");
+	TORCH_CHECK(A.dim() == 3, "A must be [B, M, K]");
 
-  const int64_t BATCH = A.size(0);
-  const int64_t M = A.size(1);
-  const int64_t K = A.size(2);
+	const int64_t BATCH = A.size(0);
+	const int64_t M = A.size(1);
+	const int64_t K = A.size(2);
 
-  bool shared_B = false;
-  int64_t N = 0;
-  if (B.dim() == 2) {
-    TORCH_CHECK(B.size(0) == K, "B(shared) must be [K, N]");
-    N = B.size(1);
-    shared_B = true;
-  } else {
-    TORCH_CHECK(B.dim() == 3, "B must be [K,N] or [B,K,N]");
-    TORCH_CHECK(B.size(0) == BATCH && B.size(1) == K, "B is [B,K,N] and must match A");
-    N = B.size(2);
-  }
+	bool shared_B = false;
+	int64_t N = 0;
+	if (B.dim() == 2)
+	{
+		TORCH_CHECK(B.size(0) == K, "B(shared) must be [K, N]");
+		N = B.size(1);
+		shared_B = true;
+	}
+	else
+	{
+		TORCH_CHECK(B.dim() == 3, "B must be [K,N] or [B,K,N]");
+		TORCH_CHECK(B.size(0) == BATCH && B.size(1) == K, "B is [B,K,N] and must match A");
+		N = B.size(2);
+	}
 
-  // Output: int32 [B, M, N]
-  auto C = torch::empty({BATCH, M, N}, A.options().dtype(torch::kInt));
+	// Output: int32 [B, M, N]
+	auto C = torch::empty({BATCH, M, N}, A.options().dtype(torch::kInt));
 
-  // Create a small pool of CUDA streams (simple and fast)
-  const int device_index = A.get_device();
-  const int num_streams = int(std::min<int64_t>(BATCH, 4));  // try 2–4 typically
-  std::vector<at::cuda::CUDAStream> at_streams;
-  at_streams.reserve(num_streams);
-  for (int i = 0; i < num_streams; ++i) {
-    at_streams.push_back(at::cuda::getStreamFromPool(/*high_priority=*/false, device_index));
-  }
+	// Create a small pool of CUDA streams (simple and fast)
+	const int device_index = A.get_device();
+	const int num_streams = int(std::min<int64_t>(BATCH, 4)); // try 2–4 typically
+	std::vector<at::cuda::CUDAStream> at_streams;
+	at_streams.reserve(num_streams);
+	for (int i = 0; i < num_streams; ++i)
+	{
+		at_streams.push_back(at::cuda::getStreamFromPool(/*high_priority=*/false, device_index));
+	}
 
-  // Enqueue each 2D matmul on a worker stream (no guards; we pass cudaStream_t directly)
-  for (int64_t b = 0; b < BATCH; ++b) {
-    at::cuda::CUDAStream s = at_streams[size_t(b % num_streams)];
-    cudaStream_t raw = s.stream();
+	// Enqueue each 2D matmul on a worker stream (no guards; we pass cudaStream_t directly)
+	for (int64_t b = 0; b < BATCH; ++b)
+	{
+		at::cuda::CUDAStream s = at_streams[size_t(b % num_streams)];
+		cudaStream_t raw = s.stream();
 
-    torch::Tensor Ab = A.select(0, b).contiguous();                     // [M, K]
-    torch::Tensor Bb = shared_B ? B : B.select(0, b).contiguous();      // [K, N]
+		torch::Tensor Ab = A.select(0, b).contiguous();				   // [M, K]
+		torch::Tensor Bb = shared_B ? B : B.select(0, b).contiguous(); // [K, N]
 
-    torch::Tensor Cb = matmul_int8_cutlass_forward_on_stream(Ab, Bb, raw);  // [M, N] int32
+		torch::Tensor Cb = matmul_int8_cutlass_forward_on_stream(Ab, Bb, raw); // [M, N] int32
 
-    // Async copy into the output slice on the same stream
-    C.select(0, b).copy_(Cb, /*non_blocking=*/true);
-  }
+		// Async copy into the output slice on the same stream
+		C.select(0, b).copy_(Cb, /*non_blocking=*/true);
+	}
 
-  // Wait for all worker streams to finish
-  for (auto& s : at_streams) {
-    s.synchronize();
-  }
+	// Wait for all worker streams to finish
+	for (auto &s : at_streams)
+	{
+		s.synchronize();
+	}
 
-  return C;
+	return C;
 }
-
 
 // -------------------------
 // PYBIND
@@ -583,16 +551,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 	m.def("dot_forward", &dot_forward, "Dot product (CUDA)");
 	m.def("matmul_f32", &matmul_f32_forward, "Matmul float32: C=A@B (CUDA)");
 	m.def("matmul_f32_cutlass", &matmul_f32_cutlass_forward, "CUTLASS GEMM float32");
-	
+
 	m.def("matmul_int8", &matmul_int8_forward, "Matmul int8->int32: C=A@B (CUDA)");
 	m.def("matmul_int8_cutlass", &matmul_int8_cutlass_forward, "CUTLASS GEMM int8->int32");
 
-  	m.def("matmul_int8_to_fp16_scaled_forward_noc",
-        &matmul_int8_to_fp16_scaled_forward_noc,
-        "Fused int8 matmul -> fp16 with scale (beta=0, no C)");
+	m.def("matmul_int8_to_fp16_scaled_forward_noc",
+		  &matmul_int8_to_fp16_scaled_forward_noc,
+		  "Fused int8 matmul -> fp16 with scale (beta=0, no C)");
 
 	m.def("bmm_int8", &bmatmul_int8_forward, "Batched matmul int8->int32: C=A@B (CUDA)");
 	m.def("bmm_int8_cutlass_forward_streams",
-        &bmm_int8_cutlass_forward_streams,
-        "Batched INT8 matmul via CUTLASS (parallel across CUDA streams)");
+		  &bmm_int8_cutlass_forward_streams,
+		  "Batched INT8 matmul via CUTLASS (parallel across CUDA streams)");
 }
