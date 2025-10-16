@@ -22,7 +22,7 @@ setup(
             include_dirs=["/home/tnguyen10/Desktop/deep_learning_research/test_cuda_lib/cutlass/include",\
                 "/home/tnguyen10/Desktop/deep_learning_research/test_cuda_lib/cutlass/tools/util/include"],
             extra_compile_args={"cxx": ["-O3"],\
-                "nvcc": ["-O3", "-std=c++17", "-gencode=arch=compute_80,code=sm_80"]},
+                "nvcc": ["-O3", "-std=c++17", "-gencode=arch=compute_86,code=sm_86"]},
             # Make the loader prefer your conda C++ runtime (no LD_LIBRARY_PATH needed)
             extra_link_args=[f"-Wl,-rpath,{conda}/lib"] if conda else [],
         )
