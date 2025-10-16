@@ -17,6 +17,17 @@
 #include <cutlass/gemm/device/gemm_universal.h>
 #include <cutlass/arch/arch.h>
 
+#include <cutlass/arch/mma.h>
+
+
+#if __has_include(<cutlass/layout/matrix.h>)
+  #include <cutlass/layout/matrix.h>
+#else
+  #include <cutlass/layout/row_major.h>
+  #include <cutlass/layout/column_major.h>
+#endif
+
+
 // -------------------------
 // 1) DOT PRODUCT
 // -------------------------
@@ -269,6 +280,124 @@ torch::Tensor matmul_int8_cutlass_forward(torch::Tensor A, torch::Tensor B)
 	return C;
 }
 
+
+
+
+// ---- CUTLASS types (SIMT/DP4A, row-major everywhere) ----
+using ElementA   = int8_t;
+using ElementB   = int8_t;
+using ElementAcc = int32_t;              // s8*s8 -> s32
+using ElementOut = cutlass::half_t;      // store FP16
+using ComputeEpi = float;                // alpha in float
+using LayoutABCD = cutlass::layout::RowMajor;
+
+// safest (no alignment assumptions)
+static int const kElementsPerAccess = 1;
+
+using EpilogueOp = cutlass::epilogue::thread::LinearCombination<
+    ElementOut,            // D (and C) element type
+    kElementsPerAccess,    // vector width (1 = scalar)
+    ElementAcc,            // accumulator
+    ComputeEpi             // alpha,beta compute type
+>;
+
+// Pure SIMT (DP4A) kernel; adjust arch if needed (e.g., Sm75/Sm86/Sm90)
+using GemmSIMT = cutlass::gemm::device::Gemm<
+    ElementA, LayoutABCD,   // A
+    ElementB, LayoutABCD,   // B
+    ElementOut, LayoutABCD, // D (and C)
+    ElementAcc,             // accumulator
+    cutlass::arch::OpClassSimt,
+    cutlass::arch::Sm80,                    // target arch
+    cutlass::gemm::GemmShape<128,128,32>,   // threadblock
+    cutlass::gemm::GemmShape<64,64,32>,     // warp
+    cutlass::gemm::GemmShape<1,1,4>,        // instruction (DP4A)
+    EpilogueOp>;
+
+// -----------------------------------------------------------
+// PyTorch-facing function:
+//   D_fp16 = alpha_scale * (A_int8 @ B_int8)
+//   A: [M,K] int8 contiguous, B: [K,N] int8 contiguous
+//   Returns D: [M,N] float16
+// -----------------------------------------------------------
+torch::Tensor matmul_int8_to_fp16_scaled_forward_noc(
+    const torch::Tensor& A,
+    const torch::Tensor& B,
+    double alpha_scale // scalar
+) {
+  TORCH_CHECK(A.is_cuda() && B.is_cuda(), "A and B must be CUDA tensors");
+  TORCH_CHECK(A.scalar_type() == at::kChar && B.scalar_type() == at::kChar, "A,B must be int8");
+  TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "A:[M,K], B:[K,N]");
+  TORCH_CHECK(A.is_contiguous() && B.is_contiguous(), "A,B must be contiguous");
+
+  int64_t M = A.size(0), K = A.size(1), N = B.size(1);
+  TORCH_CHECK(B.size(0) == K, "Inner dimension mismatch: A(M,K) x B(K,N)");
+
+  // Output D is FP16 (row-major)
+  auto D = torch::empty({M, N}, A.options().dtype(torch::kFloat16));
+
+  // ---- CUTLASS types (same as before) ----
+  using ElementA   = int8_t;
+  using ElementB   = int8_t;
+  using ElementAcc = int32_t;
+  using ElementOut = cutlass::half_t;
+  using ComputeEpi = float;
+  using LayoutRM   = cutlass::layout::RowMajor;
+
+  static int const kElementsPerAccess = 1;
+  using EpilogueOp = cutlass::epilogue::thread::LinearCombination<
+      ElementOut, kElementsPerAccess, ElementAcc, ComputeEpi>;
+
+  using GemmSIMT = cutlass::gemm::device::Gemm<
+      ElementA, LayoutRM,
+      ElementB, LayoutRM,
+      ElementOut, LayoutRM,
+      ElementAcc,
+      cutlass::arch::OpClassSimt,
+      cutlass::arch::Sm80,                   // adjust arch if needed
+      cutlass::gemm::GemmShape<128,128,32>,
+      cutlass::gemm::GemmShape<64,64,32>,
+      cutlass::gemm::GemmShape<1,1,4>,
+      EpilogueOp>;
+
+  // *** FIX 1: brace-init to avoid most vexing parse ***
+  cutlass::gemm::GemmCoord problem_size{int(M), int(N), int(K)};
+
+  int lda = int(K), ldb = int(N), ldc = int(N), ldd = int(N);
+
+  // No C/beta: pass D as C (valid pointer; beta=0 so it's not read)
+  const ElementOut* c_ptr =
+      reinterpret_cast<const ElementOut*>(D.data_ptr<at::Half>());
+
+  typename GemmSIMT::Arguments args(
+      problem_size,
+      {A.data_ptr<ElementA>(), lda},
+      {B.data_ptr<ElementB>(), ldb},
+      {c_ptr, ldc},
+      {reinterpret_cast<ElementOut*>(D.data_ptr<at::Half>()), ldd},
+      {static_cast<float>(alpha_scale), 0.0f}
+  );
+
+  GemmSIMT op;
+  auto stream = at::cuda::getCurrentCUDAStream();
+
+  // *** FIX 2: use cudaMalloc/free for workspace (no device_memory::allocation) ***
+  size_t ws_bytes = GemmSIMT::get_workspace_size(args);
+  void* workspace = nullptr;
+  if (ws_bytes) {
+    TORCH_CHECK(cudaMalloc(&workspace, ws_bytes) == cudaSuccess, "workspace cudaMalloc failed");
+  }
+
+  cutlass::Status status = op(args, workspace, stream);
+
+  if (workspace) cudaFree(workspace);
+  TORCH_CHECK(status == cutlass::Status::kSuccess, "CUTLASS fused int8->fp16 (SIMT) failed");
+
+  return D;
+}
+
+// ==================================
+
 // -------------------------
 // 4) BATCHED MATMUL INT8: C = A @ B
 //    A: (B,M,K) int8, B: (B,K,N) int8, C: (B,M,N) int32 (accumulators)
@@ -437,7 +566,7 @@ torch::Tensor bmm_int8_cutlass_forward_streams(torch::Tensor A, torch::Tensor B)
     C.select(0, b).copy_(Cb, /*non_blocking=*/true);
   }
 
-  // Simple and safe: wait for all worker streams to finish
+  // Wait for all worker streams to finish
   for (auto& s : at_streams) {
     s.synchronize();
   }
@@ -454,8 +583,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 	m.def("dot_forward", &dot_forward, "Dot product (CUDA)");
 	m.def("matmul_f32", &matmul_f32_forward, "Matmul float32: C=A@B (CUDA)");
 	m.def("matmul_f32_cutlass", &matmul_f32_cutlass_forward, "CUTLASS GEMM float32");
-	m.def("matmul_int8_cutlass", &matmul_int8_cutlass_forward, "CUTLASS GEMM int8->int32");
+	
 	m.def("matmul_int8", &matmul_int8_forward, "Matmul int8->int32: C=A@B (CUDA)");
+	m.def("matmul_int8_cutlass", &matmul_int8_cutlass_forward, "CUTLASS GEMM int8->int32");
+
+  	m.def("matmul_int8_to_fp16_scaled_forward_noc",
+        &matmul_int8_to_fp16_scaled_forward_noc,
+        "Fused int8 matmul -> fp16 with scale (beta=0, no C)");
+
 	m.def("bmm_int8", &bmatmul_int8_forward, "Batched matmul int8->int32: C=A@B (CUDA)");
 	m.def("bmm_int8_cutlass_forward_streams",
         &bmm_int8_cutlass_forward_streams,
